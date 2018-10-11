@@ -456,8 +456,108 @@ void multiply_y_pre(MatrixXdr &op, int Ncol_op ,MatrixXdr &res,bool subtract_mea
 			multiply_y_pre_naive(op,Ncol_op,res);
 	}
 }
+float compute_ELBO_svi(int j, MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double sigma_beta, double sigma_e,double pi, MatrixXdr &XsXs, int miniB)
+{
+        MatrixXdr Xs =geno_matrix.block(0, j*miniB, g.Nsnp, miniB);
+        MatrixXdr ys =pheno.block(j*miniB, 0, miniB, 1);
+
+        float ll = -g.Nindv/2* log(sigma_e);
+        MatrixXdr r = mu_k.cwiseProduct(alpha);
+        MatrixXdr Xsr = ys - Xs.transpose()*r;
+        MatrixXdr Xnorm = Xsr.cwiseProduct(Xsr);
+        ll -= Xnorm.sum()*g.Nindv/2/sigma_e/miniB;
+        for(int i =0; i<g.Nsnp ; i++)
+        {
+                float temp = alpha(i,0)*(sigma_k(i,0)+mu_k(i,0)*mu_k(i,0));
+                temp = temp - alpha(i,0)*mu_k(i,0)*alpha(i,0)*mu_k(i,0);
+                ll -= g.Nindv*XsXs(i,i)*temp /2 /sigma_e/miniB;
+                if(alpha(i,0)!=0 && alpha(i,0)!=1){
+                float temp2 = alpha(i,0)*log(alpha(i,0)/pi);
+                ll -= temp2;
+
+                float temp3 = (1-alpha(i,0))*log((1-alpha(i,0))/(1-pi));
+                ll -= temp3;
+                }
+                float temp4 = 1+ log(sigma_k(i,0)/ sigma_beta) - (sigma_k(i,0)+ mu_k(i,0)*mu_k(i,0))/sigma_beta;
+                ll += alpha(i,0)*temp4 /2;
+        }
+        return ll;
+}
+
+void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sigma_beta, double &sigma_e, double &pi, int miniB, int &t, float &ll, int step_a, int step_b, int iter)
+{
+		 for( int j=0; j<g.Nindv/miniB; j++)
+                {
+                        double step_temp = pow(t+step_a, step_b);
+                        double step = 1/step_temp;
+                        MatrixXdr Xs = geno_matrix.block(0, j*miniB, g.Nsnp, miniB);
+                        MatrixXdr XsXs= Xs * Xs.transpose(); //M*M matrix	
+			MatrixXdr ys = pheno.block(j*miniB, 0, miniB, 1);
+                        MatrixXdr Xsys = Xs * ys;
+                        
+			for( int i=0; i<g.Nsnp; i++)
+                        {
+				double sigma_k_update = 1/ (g.Nindv*XsXs(i,i)/sigma_e/miniB + 1/sigma_beta);
+				sigma_k(i,0) =sigma_k_update;
+				 MatrixXdr cur_snp = XsXs.block(0,i,g.Nsnp, 1);
+	                        cur_snp = cur_snp.cwiseProduct(alpha);
+        	                cur_snp = cur_snp.cwiseProduct(mu_k);
+                	        MatrixXdr result = cur_snp.colwise().sum();
+                        	result(0,0) = result(0,0) - cur_snp(i, 0);
+                        	double mu_k_update = Xsys(i,0);
+                        	mu_k_update = mu_k_update - result(0,0);
+                        	mu_k_update =g.Nindv*  sigma_k(i,0)* mu_k_update  / sigma_e/miniB;
+	                        mu_k(i,0)= mu_k_update;
+				//update alpha
+				double temp = mu_k(i,0)*mu_k(i,0) / sigma_k(i,0)/2;
+                        	double temp2 = sqrt(sigma_k(i,0))/sqrt(sigma_beta);
+                        	double temp3 =  pi / (1-pi);
+                        	double temp4 = exp(temp)*temp2 *temp3;
+                        	double alpha_pre = alpha(i,0)/ (1-alpha(i,0));
+                        	double update = pow(alpha_pre, 1-step);
+                        	update *= pow(temp4, step);
+                        	update *= pow(alpha_pre, 1-step);
+                        	alpha(i,0) = temp4/(temp4+1);
+				}
+			//update theta	
+	                MatrixXdr result = mu_k.cwiseProduct(mu_k) + sigma_k;
+	                result  = result.cwiseProduct(alpha);
+        	        MatrixXdr weight_sum = result.colwise().sum();
+                	MatrixXdr alpha_sum = alpha.colwise().sum();
+                	sigma_beta =(1-step)*sigma_beta + step* weight_sum(0,0) /alpha_sum(0,0);
+                	pi = pi*(1-step) + step*alpha_sum(0,0) / g.Nsnp;
 
 
+              		MatrixXdr ysys = ys.transpose()*ys;
+                	double sigma_e_update = ysys(0,0);
+                	MatrixXdr weight_mu = alpha.cwiseProduct(mu_k);
+                	MatrixXdr X_mu_alpha = Xs.transpose() * weight_mu;
+                	MatrixXdr yX_mu_alpha = ys.transpose()* X_mu_alpha;
+                	sigma_e_update  = sigma_e_update - yX_mu_alpha(0,0)*2;
+                	MatrixXdr X_square =Xs.cwiseProduct(Xs);
+                	MatrixXdr X_sigma_mu_alpha = X_square.transpose()*result;
+                	MatrixXdr X_sigma_mu_alpha_sum = X_sigma_mu_alpha.colwise().sum();
+                	sigma_e_update += X_sigma_mu_alpha_sum(0,0);
+                	for(int b=0; b<miniB; b++)
+                	{
+                        	MatrixXdr ind_i = Xs.block(0, b, g.Nsnp, 1);
+                        	ind_i = ind_i.cwiseProduct(mu_k);
+                       		ind_i = ind_i.cwiseProduct(alpha);
+                        	MatrixXdr temp = ind_i * ind_i.transpose();
+                        	double temp_sum = temp.sum() - temp.trace();
+                        	sigma_e_update += temp_sum;
+                	}
+			sigma_e_update = sigma_e_update / miniB;
+               		sigma_e = (1-step)*sigma_e + step * sigma_e_update;
+			ll=compute_ELBO_svi(j, mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, XsXs, miniB); 
+			cout<<iter<<"\t"<<t<< "\t"<<ll;
+                	double vg = pi * g.Nsnp * sigma_beta;
+                	double h2g = vg / (vg + sigma_e);
+               	 	cout<<"\t" <<pi << "\t" << vg <<"\t" <<h2g << endl;
+			t++; 
+		}	
+		return; 		
+}
 void vem_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sigma_beta, double &sigma_e, double &pi, MatrixXdr &XX, MatrixXdr &Xy)
 {
                 for( int i=0; i<g.Nsnp; i++)
@@ -515,6 +615,7 @@ void vem_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
 		return; 
 
 }
+
 float compute_ELBO_vem(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double sigma_beta, double sigma_e, double pi, MatrixXdr &XX)
 {
 
@@ -640,7 +741,7 @@ int main(int argc, char const *argv[]){
 	if(!fast_mode && !memory_efficient){
 		geno_matrix.resize(p,n);
 //		g.generate_eigen_geno(geno_matrix,var_normalize);
-		g.generate_eigen_geno(geno_matrix, false); 
+		g.generate_eigen_geno(geno_matrix, true); 
 		cout<<geno_matrix.data()<<endl; 
 		cout<<geno_matrix.rows(); 
 		cout<<geno_matrix.cols(); 
@@ -722,84 +823,48 @@ int main(int argc, char const *argv[]){
 	float prevll=0 ;
 	MatrixXdr XX= geno_matrix*geno_matrix.transpose(); 
 	MatrixXdr Xy = geno_matrix * pheno; 
+
+	double step_a =1; 
+	double step_b =1; 
+	int t=0; 
+	int miniB=g.Nindv/B; 
+	cout<< "iter\tt\tELBO\tpi\tvg\th2g"<<endl; 
+//	while(iter<=MAX_ITER ){ 
 	while(iter<= MAX_ITER && ll_det > tol){
-	/*	for( int i=0; i<g.Nsnp; i++)
-		{
-			sigma_k(i,0) = 1/ (XX(i,i)/sigma_e + 1/sigma_beta); 
-			MatrixXdr cur_snp = XX.block(0, i, g.Nsnp, 1); 
-			cur_snp = cur_snp.cwiseProduct(alpha); 
-			cur_snp = cur_snp.cwiseProduct(mu_k);
-			MatrixXdr result = cur_snp.colwise().sum(); 
-			result(0,0) = result(0,0) - cur_snp(i, 0); 
-			mu_k(i, 0) = Xy(i, 0); 
-			mu_k(i, 0) = mu_k(i,0) - result(0,0); 
-			mu_k(i,0) = sigma_k(i,0)* mu_k(i,0)  / sigma_e; 
+		
 
-			//update alpha k 
-			double temp = mu_k(i,0)*mu_k(i,0) / sigma_k(i,0)/2;
-			double temp2 = sqrt(sigma_k(i,0))/sqrt(sigma_beta);
-			double temp3 =  pi / (1-pi); 
-			double temp4 = exp(temp)*temp2 *temp3; 
-			alpha(i,0)  = temp4 / (temp4+1);
-		}
-		//update Theta
-
-		MatrixXdr result = mu_k.cwiseProduct(mu_k) + sigma_k; 
-		result  = result.cwiseProduct(alpha); 
-		MatrixXdr weight_sum = result.colwise().sum(); 
-		MatrixXdr alpha_sum = alpha.colwise().sum(); 
-		sigma_beta = weight_sum(0,0) /alpha_sum(0,0); 
-
-		pi = alpha_sum(0,0) / g.Nsnp; 
-		cout<<"PI: "<<pi<<endl;
-	 	
-		MatrixXdr yy = pheno.transpose() * pheno; 	
-		sigma_e = yy(0,0); 
+		/* one sample 
 		MatrixXdr weight_mu = alpha.cwiseProduct(mu_k); 
-		MatrixXdr X_mu_alpha = geno_matrix.transpose() *  weight_mu; 
-		MatrixXdr yX_mu_alpha = pheno.transpose() * X_mu_alpha; 
-		sigma_e = sigma_e - yX_mu_alpha(0,0)*2; 
-		double elbo_temp=0; 
-		MatrixXdr X_square = geno_matrix.cwiseProduct(geno_matrix); 
-		MatrixXdr X_sigma_mu_alpha = X_square.transpose() * result; 
-		MatrixXdr X_sigma_mu_alpha_sum = X_sigma_mu_alpha.colwise().sum(); 
-		sigma_e += X_sigma_mu_alpha_sum(0,0); 
-		elbo_temp  = X_sigma_mu_alpha_sum(0,0);
-		//cout<<"sigma_e " <<sigma_e<<endl; 
-		for(int i=0; i<g.Nindv; i++)
-		{
-			MatrixXdr ind_i = geno_matrix.block(0,i,g.Nsnp,1); 
-			ind_i  = ind_i.cwiseProduct(mu_k); 
-			ind_i = ind_i.cwiseProduct(alpha); 
-			MatrixXdr temp = ind_i * ind_i.transpose(); 
-			double temp_sum = temp.sum()- temp.trace(); 
-			sigma_e += temp_sum; 
-			elbo_temp += temp_sum; 
-		}
-		sigma_e = sigma_e / g.Nindv; 
-	
-	*/
-		//cout<<"sigma_e "<<sigma_e<<endl; 
-		//cout<<"sigma_beta " <<sigma_beta<<endl; 
-		//compute ELBO
+		MatrixXdr Xsmualpha = Xs.transpose()*weight_mu; 
+		double y_Xmualpha = pheno(j,0) - Xsmualpha(0,0); 
+		double sigma_e_update = y_Xmualpha*y_Xmualpha; 
+		
+		MatrixXdr XsXs = Xs.cwiseProduct(Xs); 
+		MatrixXdr varB = weight_mu.cwiseProduct(weight_mu); 
+		MatrixXdr mumu = mu_k.cwiseProduct(mu_k)+sigma_k; 
+		MatrixXdr varB_temp = alpha.cwiseProduct(mumu); 
+		varB = varB_temp - varB; 		
+		MatrixXdr varB_result = XsXs.cwiseProduct(varB); 
+		sigma_e_update += varB_result(0,0); 
+		sigma_e = (1-step)*sigma_e+ step*sigma_e_update; 
+
+				*/
+
 		
 		//variational EM step 
-		//vem_step(mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, XX, Xy); 
+		vem_step(mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, XX, Xy); 
+	//	variational EM ELBO
 		float ll = compute_ELBO_vem(mu_k, alpha,sigma_k, sigma_beta, sigma_e, pi,XX); 
-		//float ll = -(0.5 * g.Nindv + hyper[2]-1) + (0.5 *g.Nindv + hyper[2]-1)*std::log(l) - (0.5* g.Nsnp + hyper[0]-1) + (0.5*g.Nsnp + hyper[0]-1)*std::log(a) + 0.5*std::log(betaSigma.trace()); 
+		cout<<iter<<"\t"<<iter<<"\t"<<ll<<"\t"<<pi ;
+		double vg = sigma_beta * pi * g.Nsnp ; 
+		double h2g  = vg / (vg+sigma_e); 
+		cout<<"\t"<<vg<<"\t"<<h2g<<endl; 
+		//svi step,ELBO
+		//float ll; 
+		//svi_step(mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, miniB,t, ll,step_a, step_b,iter); 
 		if(iter>0)
 			ll_det = ll - prevll;
 		prevll = ll; 
-		cout<<iter<< ": ELBO: "<<ll<<"   "<<endl; 
-		cout<<"s_beta: "<<sigma_beta<<endl; 
-		cout<<"s_e: "<<sigma_e <<endl;  
-		
-	//	float s2g = g.Nsnp/a; 
-	//	float s2e = 1/l; 
-	//	float h2g = s2g/ (s2g + s2e); 
-//		cout<<"V(G): "<<s2g<<endl;
-//	        cout<<"V(E): "<<s2e<<endl;
-        //	cout<<"h2g: "<<h2g<<endl;
 		iter++; 
 
 
