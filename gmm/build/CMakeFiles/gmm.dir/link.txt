@@ -1,0 +1,1 @@
+/usr/bin/c++   -O3    CMakeFiles/gmm.dir/src/noninf.cpp.o CMakeFiles/gmm.dir/src/genotype.cpp.o CMakeFiles/gmm.dir/src/storage.cpp.o  -o gmm -rdynamic 
