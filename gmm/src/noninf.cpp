@@ -76,7 +76,7 @@ MatrixXdr stds; //(p,1)
 MatrixXdr sum2;
 MatrixXdr sum;  
 
-
+MatrixXdr FunCatogory; 
 options command_line_opts;
 
 bool debug = false;
@@ -471,14 +471,14 @@ float compute_ELBO_svi(int j, MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigm
                 float temp = alpha(i,0)*(sigma_k(i,0)+mu_k(i,0)*mu_k(i,0));
                 temp = temp - alpha(i,0)*mu_k(i,0)*alpha(i,0)*mu_k(i,0);
                 ll -= g.Nindv*XsXs(i,i)*temp /2 /sigma_e/miniB;
-                if(alpha(i,0)!=0 && alpha(i,0)!=1 && i<g.Nsnp/2){
+                if(alpha(i,0)!=0 && alpha(i,0)!=1 && FunCatogory(i,0)==0){
                 float temp2 = alpha(i,0)*log(alpha(i,0)/pi_q1);
                 ll -= temp2;
 
                 float temp3 = (1-alpha(i,0))*log((1-alpha(i,0))/(1-pi_q1));
                 ll -= temp3;
                 }
-		 if(alpha(i,0)!=0 && alpha(i,0)!=1 && i>=g.Nsnp/2){
+		 if(alpha(i,0)!=0 && alpha(i,0)!=1 && FunCatogory(i,0)==1){
                 float temp2 = alpha(i,0)*log(alpha(i,0)/pi_q2);
                 ll -= temp2;
 
@@ -486,10 +486,10 @@ float compute_ELBO_svi(int j, MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigm
                 ll -= temp3;
                 }
 		float temp4; 
-		if(i<g.Nsnp)
+		if(FunCatogory(i,0)==0)
                 	temp4 = 1+ log(sigma_k(i,0)/ sigma_q1/sigma_e) - (sigma_k(i,0)+ mu_k(i,0)*mu_k(i,0))/sigma_q1/sigma_e;
                else
-			temp4 = 1+ log(sigma_k(i,0)/ sigma_q2/sigma_e) - (sigma_k(i,0)+ mu_k(i,0)*mu_k(i,0))/ sigma_q1/sigma_e; 
+			temp4 = 1+ log(sigma_k(i,0)/ sigma_q2/sigma_e) - (sigma_k(i,0)+ mu_k(i,0)*mu_k(i,0))/ sigma_q2/sigma_e; 
 		 ll += alpha(i,0)*temp4 /2;
         }
         return ll;
@@ -510,7 +510,7 @@ void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
      			double sigma_beta, pi;                    
 			for( int i=0; i<g.Nsnp; i++)
                         {
-				if(i<g.Nsnp/2){
+				if(FunCatogory(i,0)==0){
 					sigma_beta=sigma_q1;
 					pi = pi_q1; 
 				} 
@@ -551,7 +551,7 @@ void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
 			sigma_q1=0; sigma_q2=0; pi_q1=0; pi_q2=0; 
 			for(int i=0; i<g.Nsnp; i++)
 			{
-				if(i<g.Nsnp/2)
+				if(FunCatogory(i,0)==0)
 				{	
 					sigma_q1 += result(i,0); 
 					pi_q1 += alpha(i,0); 
@@ -563,8 +563,8 @@ void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
 			}
 			sigma_q1 = sigma_q1 / pi_q1/sigma_e; 
 			sigma_q2 = sigma_q2 / pi_q2/sigma_e; 
-			pi_q1 = pi_q1 / (g.Nsnp/2); 
-			pi_q2 = pi_q2 / (g.Nsnp/2); 
+			pi_q1 = pi_q1 / (g.Nsnp- FunCatogory.sum()); 
+			pi_q2 = pi_q2 / (FunCatogory.sum()); 
 
               		MatrixXdr ysys = ys.transpose()*ys;
                 	double sigma_e_update = ysys(0,0);
@@ -588,7 +588,7 @@ void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
 			for(int m=0; m<g.Nsnp; m++)
 			{
 				double temp = alpha(m,0) * (mu_k(m,0)*mu_k(m,0) + sigma_k(m,0)); 
-				if(m<g.Nsnp/2)
+				if(FunCatogory(m,0)==0)
 					temp = temp / sigma_q1; 
 				else temp = temp/ sigma_q2; 
 				sigma_e_update += temp; 
@@ -597,9 +597,9 @@ void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
                		sigma_e = (1-step)*sigma_e + step * sigma_e_update;
 			ll=compute_ELBO_svi(j, mu_k, alpha, sigma_k, sigma_q1, sigma_q2, sigma_e, pi_q1, pi_q2, XsXs, miniB); 
 			cout<<iter<<"\t"<<t<< "\t"<<ll;
-                	double vg = pi_q1 * g.Nsnp * sigma_q1 * sigma_e/2 + pi_q2 * g.Nsnp* sigma_q2 * sigma_e/2;
+                	double vg = pi_q1 * (g.Nsnp-FunCatogory.sum()) * sigma_q1 * sigma_e + pi_q2 *  sigma_q2 * sigma_e*(FunCatogory.sum());
                 	double h2g = vg / (vg + sigma_e);
-               	 	cout<<"\t" <<pi_q1 <<"\t" << pi_q2 <<"\t"<<sigma_q1*sigma_e*pi_q1*g.Nsnp/2 << "\t"<< sigma_q2*sigma_e*pi_q2*g.Nsnp/2 << "\t" << vg <<"\t" <<h2g << endl;
+               	 	cout<<"\t" <<pi_q1 <<"\t" << pi_q2 <<"\t"<<sigma_q1*sigma_e*pi_q1*(g.Nsnp- FunCatogory.sum()) << "\t"<< sigma_q2*sigma_e*pi_q2*(FunCatogory.sum()) << "\t" << vg <<"\t" <<h2g << endl;
 			t++; 
 		}	
 		return; 		
@@ -781,12 +781,15 @@ int main(int argc, char const *argv[]){
 	sum2.resize(p,1); 
 	sum.resize(p,1); 
 
+	FunCatogory.resize(p,1); 
+	double func_thres_low = 0.01; 
+	double func_thres_high =0.05; 
 //	geno_matrix.resize(p,n); 
 //	g.generate_eigen_geno(geno_matrix, var_normalize); 
 
 	if(!fast_mode && !memory_efficient){
 		geno_matrix.resize(p,n);
-//		g.generate_eigen_geno(geno_matrix,var_normalize);
+		//g.generate_eigen_geno(geno_matrix,var_normalize);
 		g.generate_eigen_geno(geno_matrix, true); 
 		cout<<geno_matrix.data()<<endl; 
 		cout<<geno_matrix.rows(); 
@@ -799,10 +802,16 @@ int main(int argc, char const *argv[]){
 		means(i,0) = g.get_col_mean(i);
 		stds(i,0) =1/ g.get_col_std(i);
 		sum2(i,0) =g.get_col_sum2(i); 
-		sum(i,0)= g.get_col_sum(i); 
+		sum(i,0)= g.get_col_sum(i);
+	//	cout<<(means(i,0)/2)<<endl;
+//		cout<<1-means(i,0)/2<<endl;  
+		if((1-means(i,0)/2) >= func_thres_low & (1-means(i,0)/2) < func_thres_high)
+			FunCatogory(i,0)=0; 
+		else
+			FunCatogory(i,0)=1; 
 	}
 
-
+	cout<<FunCatogory.sum()<<endl; 
 
 //	cout<<"printing means: "<<endl<<means<<endl; 
 //	cout<<"printing std: "<<endl<<stds<<endl; 	
@@ -839,7 +848,7 @@ int main(int argc, char const *argv[]){
 	for(int i=0; i<g.Nindv; i++) 
 		pheno.block(i,0,1,pheno_num) =pheno.block(i,0,1,pheno_num) - y_mean; //center phenotype	
 	y_sum=pheno.colwise().sum();
-	
+	cout<<y_sum<<endl; 	
 
 //model
 	float hyper[4];
