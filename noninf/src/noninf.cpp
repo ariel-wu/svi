@@ -456,10 +456,10 @@ void multiply_y_pre(MatrixXdr &op, int Ncol_op ,MatrixXdr &res,bool subtract_mea
 			multiply_y_pre_naive(op,Ncol_op,res);
 	}
 }
-float compute_ELBO_svi(int j, MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double sigma_beta, double sigma_e,double pi, MatrixXdr &XsXs, int miniB)
+float compute_ELBO_svi(int j, MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double sigma_beta, double sigma_e,double pi, MatrixXdr &XsXs, int miniB, MatrixXdr &Xs, MatrixXdr &ys)
 {
-        MatrixXdr Xs =geno_matrix.block(0, j*miniB, g.Nsnp, miniB);
-        MatrixXdr ys =pheno.block(j*miniB, 0, miniB, 1);
+//        MatrixXdr Xs =geno_matrix.block(0, j*miniB, g.Nsnp, miniB);
+ //       MatrixXdr ys =pheno.block(j*miniB, 0, miniB, 1);
 
         float ll = -g.Nindv/2* log(sigma_e);
         MatrixXdr r = mu_k.cwiseProduct(alpha);
@@ -471,7 +471,7 @@ float compute_ELBO_svi(int j, MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigm
                 float temp = alpha(i,0)*(sigma_k(i,0)+mu_k(i,0)*mu_k(i,0));
                 temp = temp - alpha(i,0)*mu_k(i,0)*alpha(i,0)*mu_k(i,0);
                 ll -= g.Nindv*XsXs(i,i)*temp /2 /sigma_e/miniB;
-                if(alpha(i,0)!=0 && alpha(i,0)!=1){
+                if(alpha(i,0)!=0 && alpha(i,0)!=1 && pi !=1 && pi !=0){
                 float temp2 = alpha(i,0)*log(alpha(i,0)/pi);
                 ll -= temp2;
 
@@ -486,20 +486,51 @@ float compute_ELBO_svi(int j, MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigm
 
 void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sigma_beta, double &sigma_e, double &pi, int miniB, int &t, float &ll, int step_a, int step_b, int iter)
 {
+		//shuffle data
+		//std::vector<int> perm; 
+		//for(int i=0; i<g.Nindv; i++)
+		//	perm.push_back(i); 
+		//std::random_shuffle(perm.begin(), perm.end()); 
+
+		//shuffle data
+		//permutation matrix
+		MatrixXdr perm_max = MatrixXdr::Constant(g.Nindv,g.Nindv,0); 
+		//random generator 
+		std::vector<int> perm; 
+		for (int i=0; i<g.Nindv; i++)
+			perm.push_back(i); 
+		std::random_shuffle(perm.begin(), perm.end()); 
+		for (int i=0; i<g.Nindv; i++)
+		{
+			int idx = perm[i];
+			perm_max(i,idx)=1;  
+			
+		}
+
+		//shuffle 
+		MatrixXdr geno_shuffle = geno_matrix * perm_max.transpose(); 
+		MatrixXdr pheno_shuffle = perm_max * pheno; 
+
 		 for( int j=0; j<g.Nindv/miniB; j++)
                 {
                         double step_temp = pow(t+step_a, step_b);
                         double step = 1/step_temp;
-                        MatrixXdr Xs = geno_matrix.block(0, j*miniB, g.Nsnp, miniB);
+			//set this if force to forget 
+			step=1; 
+                        MatrixXdr Xs = geno_shuffle.block(0, j*miniB, g.Nsnp, miniB);//take Bth block
                         MatrixXdr XsXs= Xs * Xs.transpose(); //M*M matrix	
-			MatrixXdr ys = pheno.block(j*miniB, 0, miniB, 1);
+			MatrixXdr ys = pheno_shuffle.block(j*miniB, 0, miniB, 1);
                         MatrixXdr Xsys = Xs * ys;
-                        
+                       //E step 
 			for( int i=0; i<g.Nsnp; i++)
                         {
-				double sigma_k_update = 1/ (g.Nindv*XsXs(i,i)/sigma_e/miniB + 1/sigma_beta);
+				//sigma_m
+				// 1/(g.Nindv*XsXs(i,i)/miniB/sigma_e + 1/sigma_beta) for previous parameterization  
+				double sigma_k_update = 1/ (g.Nindv*XsXs(i,i)/miniB/sigma_e + 1/sigma_beta);
 				sigma_k(i,0) =sigma_k_update;
-				 MatrixXdr cur_snp = XsXs.block(0,i,g.Nsnp, 1);
+				
+				//mu_m
+				MatrixXdr cur_snp = XsXs.block(0,i,g.Nsnp, 1);
 	                        cur_snp = cur_snp.cwiseProduct(alpha);
         	                cur_snp = cur_snp.cwiseProduct(mu_k);
                 	        MatrixXdr result = cur_snp.colwise().sum();
@@ -517,17 +548,22 @@ void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
                         	double update = pow(alpha_pre, 1-step);
                         	update *= pow(temp4, step);
                         	update *= pow(alpha_pre, 1-step);
-                        	alpha(i,0) = temp4/(temp4+1);
+				alpha(i,0) = temp4/(temp4+1);
 				}
-			//update theta	
+			//M-step
+			//update theta
+			//sigma_beta	
 	                MatrixXdr result = mu_k.cwiseProduct(mu_k) + sigma_k;
 	                result  = result.cwiseProduct(alpha);
         	        MatrixXdr weight_sum = result.colwise().sum();
                 	MatrixXdr alpha_sum = alpha.colwise().sum();
                 	sigma_beta =(1-step)*sigma_beta + step* weight_sum(0,0) /alpha_sum(0,0);
-                	pi = pi*(1-step) + step*alpha_sum(0,0) / g.Nsnp;
-
-
+		
+                	//causal proportion pi
+			pi = pi*(1-step) + step*alpha_sum(0,0) / g.Nsnp;
+			
+		
+			//sigma_e update
               		MatrixXdr ysys = ys.transpose()*ys;
                 	double sigma_e_update = ysys(0,0);
                 	MatrixXdr weight_mu = alpha.cwiseProduct(mu_k);
@@ -549,7 +585,7 @@ void svi_step(MatrixXdr &mu_k, MatrixXdr &alpha, MatrixXdr &sigma_k, double &sig
                 	}
 			sigma_e_update = sigma_e_update / miniB;
                		sigma_e = (1-step)*sigma_e + step * sigma_e_update;
-			ll=compute_ELBO_svi(j, mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, XsXs, miniB); 
+			ll=compute_ELBO_svi(j, mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, XsXs, miniB, Xs, ys); 
 			cout<<iter<<"\t"<<t<< "\t"<<ll;
                 	double vg = pi * g.Nsnp * sigma_beta;
                 	double h2g = vg / (vg + sigma_e);
@@ -821,16 +857,16 @@ int main(int argc, char const *argv[]){
 
 	float ll_det=1; 
 	float prevll=0 ;
-	MatrixXdr XX= geno_matrix*geno_matrix.transpose(); 
-	MatrixXdr Xy = geno_matrix * pheno; 
+//	MatrixXdr XX= geno_matrix*geno_matrix.transpose(); 
+//	MatrixXdr Xy = geno_matrix * pheno; 
 
 	double step_a =1; 
 	double step_b =1; 
 	int t=0; 
 	int miniB=g.Nindv/B; 
 	cout<< "iter\tt\tELBO\tpi\tvg\th2g"<<endl; 
-//	while(iter<=MAX_ITER ){ 
-	while(iter<= MAX_ITER && ll_det > tol){
+	while(iter<=MAX_ITER ){ 
+//	while(iter<= MAX_ITER && ll_det > tol){
 		
 
 		/* one sample 
@@ -850,7 +886,7 @@ int main(int argc, char const *argv[]){
 
 				*/
 
-		
+	/*	
 		//variational EM step 
 		vem_step(mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, XX, Xy); 
 	//	variational EM ELBO
@@ -859,9 +895,10 @@ int main(int argc, char const *argv[]){
 		double vg = sigma_beta * pi * g.Nsnp ; 
 		double h2g  = vg / (vg+sigma_e); 
 		cout<<"\t"<<vg<<"\t"<<h2g<<endl; 
+	*/
 		//svi step,ELBO
-		//float ll; 
-		//svi_step(mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, miniB,t, ll,step_a, step_b,iter); 
+		float ll; 
+		svi_step(mu_k, alpha, sigma_k, sigma_beta, sigma_e, pi, miniB,t, ll,step_a, step_b,iter); 
 		if(iter>0)
 			ll_det = ll - prevll;
 		prevll = ll; 
